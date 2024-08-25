@@ -110,8 +110,43 @@ async function menu(
     }
   });
 
+  // globalResources.audioCtx.resume();
+  // globalResources.thrusterAudio.currentTime = 0;
+  // globalResources.thrusterAudio.repeat = true;
+
   window.addEventListener("pointerup", (e) => {
     mouse.down = false;
+
+    // if (!globalResources.thrusterAudio.playing) {
+    // globalResources.audioCtx.resume();
+    // // globalResources.thrusterAudio.currTime = 0;
+    // globalResources.thrusterAudio.play();
+    // // }
+
+    // if (globalResources.gainNode.gain.value > 0.5) {
+    //   globalResources.gainNode.gain.setValueAtTime(
+    //     globalResources.gainNode.gain.value,
+    //     globalResources.audioCtx.currentTime,
+    //   );
+    //   globalResources.gainNode.gain.exponentialRampToValueAtTime(
+    //     0.0001,
+    //     globalResources.audioCtx.currentTime + 0.1,
+    //   );
+    // } else {
+    //   globalResources.gainNode.gain.setValueAtTime(
+    //     globalResources.gainNode.gain.value,
+    //     globalResources.audioCtx.currentTime,
+    //   );
+    //   globalResources.gainNode.gain.exponentialRampToValueAtTime(
+    //     1,
+    //     globalResources.audioCtx.currentTime + 0.1,
+    //   );
+    // }
+
+    // globalResources.gainNode.gain.exponentialRampToValueAtTime(
+    //   0.6,
+    //   globalResources.thrusterAudio.currentTime + 0.1,
+    // );
   });
 
   window.addEventListener("wheel", (e) => {
@@ -431,7 +466,7 @@ async function menu(
       width: elements.play.width,
       height: 100,
     };
- 
+
     if (
       mouse.down &&
       mouseOutsideLevelBoxes <= 0 &&
@@ -505,7 +540,7 @@ async function menu(
 
       if (
         mouseInsideElement(playbuttonElement) &&
-        mouse.down &&
+        (mouse.down || levelReqSent) &&
         selectedLevel + 1 <= networkClient.currLevel
       ) {
         if (playbuttonHold == null) {
@@ -513,7 +548,6 @@ async function menu(
         } else {
           const holdProgress = Date.now() - playbuttonHold;
           const holdProgressF = Math.min(1, holdProgress / 600);
-
           ctx.fillStyle = "rgba(255, 255, 255, 1)";
           ctx.fillRect(
             elements.play.x,
@@ -530,28 +564,32 @@ async function menu(
             elements.play.y + elements.play.height - 40,
           );
 
-          if (holdProgressF >= 0.7 && !levelReqSent) {
+          if (holdProgressF >= 1 && !levelReqSent) {
             levelReqSent = true;
-            networkClient.requestGame(selectedLevel + 1).then((result) => {
-              if (result) return;
-              console.log("Level request failed");
-            });
             console.log("Requesting game...");
-          }
 
-          if (holdProgressF <= 0 && levelReqSent) {
-            levelReqSent = false;
-          }
-
-          if (holdProgressF >= 1 && networkClient.gameSessionID != null) {
-            console.log(networkClient.gameSessionID);
-            console.log("Request succeeded, starting level :)");
-            quitted = true;
-            onGameStart(selectedLevel);
+            networkClient
+              .requestGame(selectedLevel + 1)
+              .then((result) => {
+                if (!result) {
+                  levelReqSent = false;
+                  playbuttonHold = null;
+                  alert("Failed to start level");
+                  return;
+                }
+                console.log(networkClient.gameSessionID);
+                console.log("Request succeeded, starting level :)");
+                quitted = true;
+                onGameStart(selectedLevel);
+              })
+              .catch((e) => {
+                console.error(e);
+                levelReqSent = false;
+                playbuttonHold = null;
+              });
           }
         }
-      } else if (playbuttonHold != null) {
-        levelReqSent = false;
+      } else if (!levelReqSent) {
         playbuttonHold = null;
       }
     }

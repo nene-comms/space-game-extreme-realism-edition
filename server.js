@@ -4,8 +4,28 @@ const express = require("express");
 const fs = require("fs");
 const uuid = require("uuid");
 const admin = require("firebase-admin");
+const https = require("https");
 const { getFirestore } = require("firebase-admin/firestore");
-// const serviceAccount = require("./serviceAccount.json");
+
+const credentials = {};
+
+if (process.env.PROD) {
+  const key = fs.readFileSync(
+    "/etc/letsencrypt/live/upright-parallelport.online-0001/privkey.pem",
+    "utf8",
+  );
+  const certificate = fs.readFileSync(
+    "/etc/letsencrypt/live/upright-parallelport.online-0001/cert.pem",
+    "utf8",
+  );
+  const ca = fs.readFileSync(
+    "/etc/letsencrypt/live/upright-parallelport.online-0001/chain.pem",
+    "utf8",
+  );
+  credentials.key = key;
+  credentials.cert = certificate;
+  credentials.ca = ca;
+}
 
 //load the firebase service account file from env
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
@@ -476,6 +496,12 @@ class GameSession {
       //game always starts at (0, 0)
       return false;
 
+    for (const event of this.eventlog) {
+      if (event.type == "alive") {
+        if (event.health <= 0) return false;
+      }
+    }
+
     //Thats it for now >:)
 
     return true;
@@ -756,6 +782,9 @@ class GameSessionsManager {
 
     this.sessionGameSessionMap = new Map();
     this.gameSessions = new Map();
+
+    this.finishedSessionPool = new Map();
+
     this.sessionPoll = setInterval(() => {
       for (const [sessionID, gsid] of this.sessionGameSessionMap) {
         const gameSession = this.gameSessions.get(gsid);
@@ -767,41 +796,43 @@ class GameSessionsManager {
           this.deleteGameSession(sessionID, gsid);
         }
 
-        if (!gameSession.running) {
-          console.log(`Deleting session because it has finished running`);
-          const validSession = gameSession.validateFinalEventLog();
-          if (!validSession) {
-            console.log(
-              `Invalidated game session because of invalid event log`,
-            );
-          }
-
-          console.log(`Last event: ${gameSession.lastEventType}`);
-
-          if (gameSession.lastEventType == "finish" && validSession) {
-            try {
-              console.log(`Game duration ${gameSession.duration}`);
-              const userid = gameSession.userID;
-              database.updateUserProgress(
-                userid,
-                gameSession.levelNum,
-                gameSession.duration,
-              );
-            } catch (_) {}
-          }
-
-          if (gameSession.lastEventType == "dead") {
-            try {
-              const userid = gameSession.userID;
-              database.updateDeathCount(userid, gameSession.levelNum);
-            } catch (e) {}
-          }
-
-          gameSession.onClose();
-          this.deleteGameSession(sessionID, gsid);
-        }
+        //rest should be a separate
       }
-    }, 5000);
+
+      for (const [sessionID, gsid] of this.finishedSessionPool) {
+        const gameSession = this.gameSessions.get(gsid);
+        console.log(`Deleting session because it has finished running`);
+        const validSession = gameSession.validateFinalEventLog();
+        if (!validSession) {
+          console.log(`Invalidated game session because of invalid event log`);
+        }
+
+        console.log(`Last event: ${gameSession.lastEventType}`);
+
+        if (gameSession.lastEventType == "finish" && validSession) {
+          try {
+            console.log(`Game duration ${gameSession.duration}`);
+            const userid = gameSession.userID;
+            database.updateUserProgress(
+              userid,
+              gameSession.levelNum,
+              gameSession.duration,
+            );
+          } catch (_) {}
+        }
+
+        if (gameSession.lastEventType == "dead") {
+          try {
+            const userid = gameSession.userID;
+            database.updateDeathCount(userid, gameSession.levelNum);
+          } catch (e) {}
+        }
+
+        gameSession.onClose();
+        this.gameSessions.delete(gsid);
+      }
+      this.finishedSessionPool.clear();
+    }, 30000);
   }
 
   createGameSession(userID, userSessionID, gameSessionID, levelnum) {
@@ -843,7 +874,14 @@ class GameSessionsManager {
     if (!rawEventJSON.type) return false;
     if (!gameSession) return false;
 
-    return gameSession.onReceiveKeepAlive(rawEventJSON);
+    const ret = gameSession.onReceiveKeepAlive(rawEventJSON);
+
+    if (!gameSession.running) {
+      this.finishedSessionPool.set(gameSession.userSessionID, gameSessionID);
+      this.sessionGameSessionMap.delete(gameSession.userSessionID);
+    }
+
+    return ret;
   }
 }
 
@@ -912,6 +950,11 @@ app.post("/:userid/:sessionid/gamereq/:level", async (req, res) => {
   console.log("Requesting level ", levelnum, user.currLevel);
   if (levelnum > user.currlevel) {
     res.status(401).send("You havent reached there yet :(");
+    return;
+  }
+
+  if (levelnum > database.levelCount) {
+    res.status(401).send("Invalid level");
     return;
   }
 
@@ -1194,4 +1237,12 @@ app.get("/leaderboard/global/", (req, res) => {
 });
 
 app.use(express.static("public"));
-app.listen(process.env.PORT || 5173, process.env.ADDR || "127.0.0.1");
+
+if (process.env.PROD) {
+  const httpServer = https.createServer(credentials, app);
+  httpServer.listen(443, () => {
+    console.log("HTTP server listening on port 443");
+  });
+} else {
+  app.listen(process.env.PORT || 5173, process.env.ADDR || "127.0.0.1");
+}

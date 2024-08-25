@@ -72,6 +72,7 @@ async function main(
     shouldStopPlay = () => {},
     onStopInstance = () => {},
     onExitToMenu: exitToMenuCallback = () => {},
+    onRequestNextLevel: onRequestNextLevel = () => {},
   } = {
     shouldStopInstanceCallback: () => false,
     restartCallback: () => {},
@@ -80,6 +81,7 @@ async function main(
     shouldStopPlay: () => {},
     onStopInstance: () => {},
     onExitToMenu: () => {},
+    onRequestNextLevel: (onRequestNextLevel = () => {}),
   },
 ) {
   const Engine = Matter.Engine,
@@ -180,9 +182,13 @@ async function main(
   const PI = Math.PI;
   const PI_2 = Math.PI / 2;
 
-  let leftThruster, rightThruster;
+  let leftThruster,
+    rightThruster,
+    prevLeftThruster = false,
+    prevRightThruster = false;
 
   addEventListener("keydown", (e) => {
+    globalResources.audioCtx.resume();
     if (
       (e.key == "Enter" || e.key == "e") &&
       scrollableMenu.enterClickStart < 0
@@ -472,6 +478,8 @@ async function main(
   const menuElt = document.getElementById("menu");
 
   menuElt.addEventListener("click", (e) => {
+    globalResources.audioCtx.resume();
+
     e.preventDefault();
     e.stopPropagation();
     ctx.canvas.focus();
@@ -518,6 +526,7 @@ async function main(
   });
 
   addEventListener("pointerdown", (e) => {
+    globalResources.audioCtx.resume();
     if (e.target == menuElt) {
       return;
     }
@@ -535,7 +544,11 @@ async function main(
       x <
       width / 2 - width * 0.125
     ) {
+      const prevLeftThruster = leftThruster;
       if (!shouldStopPlay() && !scrollableMenu.enabled) leftThruster = true;
+
+      if (leftThruster != prevLeftThruster && leftThruster) {
+      }
 
       scrollableMenu.leftPointerDown();
     }
@@ -1163,6 +1176,10 @@ async function main(
           if (item == "Exit to menu") {
             exitToMenuCallback();
           }
+
+          if (item == "Next") {
+            onRequestNextLevel();
+          }
         };
       }
     }
@@ -1272,6 +1289,34 @@ async function main(
 
     //other logics
 
+    if (
+      prevLeftThruster != leftThruster ||
+      prevRightThruster != rightThruster
+    ) {
+      globalResources.audioCtx.resume();
+      globalResources.thrusterAudio.play();
+      // globalResources.thrusterAudio.repeat = true;
+
+      // console.log("playing sound..");
+
+      let vol = leftThruster || rightThruster ? 0.7 : 0.0;
+      vol += leftThruster && rightThruster ? 0.2 : 0.0;
+
+      globalResources.gainNode.gain.setValueAtTime(
+        globalResources.gainNode.gain.value,
+        globalResources.audioCtx.currentTime,
+      );
+
+      globalResources.gainNode.gain.linearRampToValueAtTime(
+        vol,
+        globalResources.audioCtx.currentTime +
+          (globalResources.gainNode.gain.value > vol ? 0.3 : 0.2),
+      );
+
+      prevLeftThruster = leftThruster;
+      prevRightThruster = rightThruster;
+    }
+
     if (leftThruster || rightThruster) {
       let forceOrigin = Vector.create(ship.position.x, ship.position.y);
       const fOriginOffset = Vector.rotate(
@@ -1280,7 +1325,7 @@ async function main(
           (leftThruster ? 1 : 0) * PI_2 +
           (rightThruster ? 1 : 0) * PI_2,
       );
-      const forceMag = leftThruster && rightThruster ? 0.02 : 0.01;
+      const forceMag = leftThruster && rightThruster ? 0.008 : 0.006;
       const forceOriginOff = Vector.add(forceOrigin, fOriginOffset);
       const force = Vector.rotate(Vector.create(0, -forceMag), ship.angle);
       Body.applyForce(ship, forceOriginOff, force);
@@ -1316,10 +1361,10 @@ async function main(
     }
 
     const dp = Vector.sub(ship.position, camPos);
-    let accel = (collided ? 0.06 : 0.02) * Vector.magnitude(dp);
+    let accel = (collided ? 0.08 : 0.01) * Vector.magnitude(dp);
     const norm_dp = Vector.normalise(dp);
     camVel = Vector.add(camVel, Vector.mult(norm_dp, accel));
-    camVel = Vector.sub(camVel, Vector.mult(camVel, collided ? 0.03 : 0.4));
+    camVel = Vector.sub(camVel, Vector.mult(camVel, collided ? 0.02 : 0.2));
     camPos = Vector.add(camPos, Vector.mult(camVel, dt));
     collided = false;
 
@@ -1418,7 +1463,9 @@ loadGlobalResources(renderers.width, renderers.height).then(
     }
 
     function shouldStopIntance() {
-      return shipStats.requiresRestart || shipStats.gotoMenu;
+      return (
+        shipStats.requiresRestart || shipStats.gotoMenu || shipStats.nextLevel
+      );
     }
 
     function onRestart() {
@@ -1429,6 +1476,9 @@ loadGlobalResources(renderers.width, renderers.height).then(
       if (shipStats.requiresRestart) {
         shipStats.requiresRestart = false;
 
+        const _ = await networkClient.sendDeath(); //this closes the game
+
+        //otherwise we cannot start a new session
         const result = await networkClient.requestGame(gameStats.level);
 
         if (!result) {
@@ -1449,6 +1499,21 @@ loadGlobalResources(renderers.width, renderers.height).then(
         startMenu();
         return;
       }
+
+      if (shipStats.nextLevel) {
+        shipStats.nextLevel = false;
+        console.log("requesting  next level");
+        let res = await networkClient.requestGame(gameStats.level);
+
+        if (!res) {
+          resetStats();
+          startMenu();
+          return;
+        }
+
+        resetStats();
+        startInstance();
+      }
     }
 
     async function startMenu() {
@@ -1462,7 +1527,15 @@ loadGlobalResources(renderers.width, renderers.height).then(
     }
 
     function exitToMenu() {
+      networkClient.sendDeath();
+      networkClient.gameSessionID = null;
       shipStats.gotoMenu = true;
+    }
+
+    function onReqeuestNextLevel() {
+      gameStats.level += 1;
+      shipStats.nextLevel = true;
+      console.log("moving to next level");
     }
 
     async function startInstance() {
@@ -1495,6 +1568,7 @@ loadGlobalResources(renderers.width, renderers.height).then(
           restartCallback: onRestart,
           onStopInstance,
           onExitToMenu: exitToMenu,
+          onRequestNextLevel: onReqeuestNextLevel,
         },
       );
     }
